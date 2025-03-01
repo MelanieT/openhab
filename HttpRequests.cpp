@@ -8,6 +8,7 @@
 #include "HttpRequests.h"
 
 mutex HttpRequests::m_httpLock;
+string HttpRequests::m_apiToken;
 
 esp_err_t HttpRequests::postUrl(const std::string& url, std::vector<uint8_t>& data, const function<void(vector<uint8_t>&)>& func)
 {
@@ -41,6 +42,10 @@ esp_err_t HttpRequests::postUrl(const std::string& url, std::vector<uint8_t>& da
         esp_http_client_set_post_field(handle, (const char *) body.data(), (int) body.size());
         esp_http_client_set_header(handle, "Content-type", "text/plain");
         esp_http_client_set_header(handle, "Accept", "application/json");
+        if (!m_apiToken.empty()) {
+            static string auth = string("bearer " + m_apiToken);
+            esp_http_client_set_header(handle, "Authorization:", auth.c_str());
+        }
 
         err = esp_http_client_perform(handle);
 
@@ -90,6 +95,10 @@ esp_err_t HttpRequests::getUrl(const std::string& url, const function<void(vecto
     while (true)
     {
         esp_http_client *handle = esp_http_client_init(&conf);
+        if (!m_apiToken.empty()) {
+            static string auth = string("bearer " + m_apiToken);
+            esp_http_client_set_header(handle, "Authorization:", auth.c_str());
+        }
 
         err = esp_http_client_perform(handle);
 

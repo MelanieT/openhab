@@ -37,6 +37,14 @@ OpenHab::OpenHab(string baseUrl) :
 
 }
 
+OpenHab::OpenHab(string baseUrl, string apiToken) :
+    m_baseUrl(move(baseUrl)),
+    m_apiToken(std::move(apiToken)),
+    m_eventUrl(nullptr)
+{
+    HttpRequests::setApiToken(apiToken);
+}
+
 void OpenHab::connectEventChannel()
 {
     BaseType_t err;
@@ -406,3 +414,4 @@ void OpenHab::unregisterEventHandler(OpenHabObject *obj)
 {
     m_eventHandlers.remove(obj);
 }
+

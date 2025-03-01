@@ -30,6 +30,7 @@ class OpenHab
 public:
     OpenHab();
     explicit OpenHab(string baseUrl);
+    OpenHab(string baseUrl, string apiToken);
     ~OpenHab() = default;
 
     void connectEventChannel();
@@ -49,6 +50,7 @@ public:
 
 protected:
     string m_baseUrl;
+    string m_apiToken;
     shared_ptr<OpenHabObject> m_root = nullptr;
 
 private:
