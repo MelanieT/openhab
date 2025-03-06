@@ -10,6 +10,8 @@
 #include "esp_http_client.h"
 #include "HttpRequests.h"
 
+list<OpenHabObject *> OpenHab::m_eventHandlers;
+
 static vector<string> split (const string &s, char delim) {
     vector<string> result;
     stringstream ss (s);
@@ -22,17 +24,17 @@ static vector<string> split (const string &s, char delim) {
     return result;
 }
 
-list<OpenHabObject *> OpenHab::m_eventHandlers;
-
 OpenHab::OpenHab() :
-    m_eventUrl(nullptr)
+    m_eventUrl(nullptr),
+    m_handle(nullptr)
 {
 
 }
 
 OpenHab::OpenHab(string baseUrl) :
     m_baseUrl(move(baseUrl)),
-    m_eventUrl(nullptr)
+    m_eventUrl(nullptr),
+    m_handle(nullptr)
 {
 
 }
@@ -40,7 +42,8 @@ OpenHab::OpenHab(string baseUrl) :
 OpenHab::OpenHab(string baseUrl, string apiToken) :
     m_baseUrl(move(baseUrl)),
     m_apiToken(std::move(apiToken)),
-    m_eventUrl(nullptr)
+    m_eventUrl(nullptr),
+    m_handle(nullptr)
 {
     HttpRequests::setApiToken(apiToken);
 }
@@ -48,7 +51,7 @@ OpenHab::OpenHab(string baseUrl, string apiToken) :
 void OpenHab::connectEventChannel()
 {
     BaseType_t err;
-    while ((err = xTaskCreatePinnedToCore(OpenHab::openHabEventTask, "event_task", 4096, this, 3, &m_eventTask, 0)) != pdPASS)
+    while ((err = xTaskCreatePinnedToCore(OpenHab::openHabEventTask, "event_task", 4096, this, 3, (TaskHandle_t *)&m_eventTask, 0)) != pdPASS)
     {
         m_eventTask = nullptr;
         printf("Failed to create event task, err %d\r\n", err);
@@ -60,12 +63,23 @@ void OpenHab::connectEventChannel()
 
 void OpenHab::disconnectEventChannel()
 {
-    if (m_eventTask)
+    printf("Cancelling event stream request\r\n");
+    while (m_eventTask)
     {
-        vTaskDelete(m_eventTask);
-        free(m_eventUrl);
-        m_eventUrl = nullptr;
+        m_abort = true;
+        if (m_handle)
+            esp_http_client_cancel_request(m_handle);
     }
+
+    m_abort = false;
+    free(m_eventUrl);
+
+//    if (m_eventTask)
+//    {
+//        vTaskDelete(m_eventTask);
+//        free(m_eventUrl);
+//        m_eventUrl = nullptr;
+//    }
 }
 
 int OpenHab::openHabEvent(esp_http_client_event *ev)
@@ -149,55 +163,6 @@ int OpenHab::openHabEvent(esp_http_client_event *ev)
         }
     }
 
-
-
-//        ((char *)ev->data)[ev->data_len] = 0;
-//        string message = ((char *)ev->data);
-//        const regex ws_re("\\r?\\n"); // whitespace
-//        vector<string> pieces;
-//
-//        copy(sregex_token_iterator(message.begin(), message.end(), ws_re, -1),
-//                  sregex_token_iterator(),
-//                  back_inserter(pieces));
-//
-//        if (pieces[0] != "event: message")
-//            return ESP_OK;
-//
-//        if (pieces.size() < 2 || pieces[1].length() < 7)
-//            return ESP_OK;
-//
-//        string json_str = pieces[1].substr(6);
-//
-//        json msg;
-//        try
-//        {
-//            msg = json::parse(json_str);
-//        }
-//        catch (exception& e)
-//        {
-//            printf("Exception: %s\r\n", e.what());
-//            printf("JSON: %s\r\n", json_str.c_str());
-//            return ESP_OK;
-//        }
-//
-//        auto topic = msg["topic"].get<string>();
-//        auto pathParts = split(topic, '/');
-//        msg["target"] = pathParts[2];
-//        msg["path_parts"] = pathParts;
-//
-//        if (msg.contains("payload"))
-//        {
-//            json payload = json::parse(msg["payload"].get<string>());
-//            msg["payload"] = payload;
-//        }
-//
-////        printf("JSON: %s\r\n", msg.dump().c_str());
-//
-////        printf("Heap free %ld min %ld lblock %d\r\n", esp_get_free_heap_size(), esp_get_minimum_free_heap_size(),
-////               heap_caps_get_largest_free_block(0));
-//
-//        ((OpenHab *)ev->user_data)->sendStatusUpdate(msg);
-//    }
     return ESP_OK;
 }
 
@@ -224,9 +189,17 @@ void OpenHab::openHabEventTask(void *user)
 
     while (true)
     {
-        esp_http_client *handle = esp_http_client_init(&conf);
-        esp_err_t err = esp_http_client_perform(handle);
-        esp_http_client_close(handle);
+        openhab->m_handle = esp_http_client_init(&conf);
+        esp_err_t err = esp_http_client_perform(openhab->m_handle);
+        esp_http_client_close(openhab->m_handle);
+        openhab->m_handle = nullptr;
+
+        printf("http_client_perform exited with code %d\r\n", err);
+        if (openhab->m_abort)
+        {
+            openhab->m_eventTask = nullptr;
+            vTaskDelete(nullptr);
+        }
 
         if (err == ESP_OK) {
             continue;
@@ -237,7 +210,7 @@ void OpenHab::openHabEventTask(void *user)
             vTaskDelay(2000 / portTICK_PERIOD_MS);
             continue;
         }
-        printf("Err is %d, retry\r\n", err);
+        printf("Event channel disconnected, error %d, retrying\r\n", err);
     }
 
     vTaskDelete(nullptr);

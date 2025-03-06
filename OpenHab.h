@@ -62,9 +62,11 @@ private:
     virtual void handleSitemaps(vector<uint8_t>& data, const function<void(vector<Sitemap>)>& func);
     void addChildrenRecursive(shared_ptr<OpenHabObject>& current, const json& data, OpenHabFactory *factory);
 
-    TaskHandle_t m_eventTask = nullptr;
+    volatile TaskHandle_t m_eventTask = nullptr;
     char *m_eventUrl;
     static list<OpenHabObject *> m_eventHandlers;
+    volatile bool m_abort = false;
+    esp_http_client *m_handle;
 };
 
 
