@@ -373,6 +373,8 @@ ItemType OpenHab::mapItemType(const json &data)
             return ItemType::GroupItem;
         else if (type == "Number")
             return ItemType::NumberItem;
+        else if (type == "String")
+            return ItemType::StringItem;
     }
     return ItemType::UnknownItem;
 }

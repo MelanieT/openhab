@@ -33,6 +33,7 @@ enum ItemType
     GroupItem,
     UnknownItem,
     NumberItem,
+    StringItem,
 };
 
 struct StateDescription
