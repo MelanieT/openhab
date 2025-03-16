@@ -39,6 +39,7 @@ public:
     inline string baseUrl() { return m_baseUrl; };
     inline void setBaseUrl(string url) { m_baseUrl = move(url); };
     inline void setApiKey(string apiKey) { m_apiToken = move(apiKey);};
+    inline void setEventTaskStackSize(int stackSize) { m_eventTaskStackSize = stackSize; };
 
     int loadSitemapsList(const function<void(vector<Sitemap>)>&);
     int loadSitemap(const string& url, OpenHabFactory *factory, const function<void(shared_ptr<OpenHabObject>)>& func, void *userData);
@@ -62,6 +63,7 @@ private:
     virtual void handleSitemaps(vector<uint8_t>& data, const function<void(vector<Sitemap>)>& func);
     void addChildrenRecursive(shared_ptr<OpenHabObject>& current, const json& data, OpenHabFactory *factory);
 
+    int m_eventTaskStackSize = 4096;
     volatile TaskHandle_t m_eventTask = nullptr;
     char *m_eventUrl;
     static list<OpenHabObject *> m_eventHandlers;

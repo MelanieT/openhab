@@ -51,7 +51,7 @@ OpenHab::OpenHab(string baseUrl, string apiToken) :
 void OpenHab::connectEventChannel()
 {
     BaseType_t err;
-    while ((err = xTaskCreatePinnedToCore(OpenHab::openHabEventTask, "event_task", 4096, this, 3, (TaskHandle_t *)&m_eventTask, 0)) != pdPASS)
+    while ((err = xTaskCreatePinnedToCore(OpenHab::openHabEventTask, "event_task", m_eventTaskStackSize, this, 3, (TaskHandle_t *)&m_eventTask, 0)) != pdPASS)
     {
         m_eventTask = nullptr;
         printf("Failed to create event task, err %d\r\n", err);
