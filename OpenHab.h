@@ -9,6 +9,7 @@
 #include <utility>
 #include <esp_http_client.h>
 #include <list>
+#include <mutex>
 
 #include "nlohmann/json.hpp"
 #include "OpenHabObject.h"
@@ -38,7 +39,7 @@ public:
 
     inline string baseUrl() { return m_baseUrl; };
     inline void setBaseUrl(string url) { m_baseUrl = move(url); };
-    inline void setApiKey(string apiKey) { m_apiToken = move(apiKey);};
+    inline void setApiKey(string apiKey) { m_apiToken = move(apiKey); HttpRequests::setApiToken(m_apiToken); };
 
     int loadSitemapsList(const function<void(vector<Sitemap>)>&);
     int loadSitemap(const string& url, OpenHabFactory *factory, const function<void(shared_ptr<OpenHabObject>)>& func, void *userData);
@@ -65,8 +66,10 @@ private:
     volatile TaskHandle_t m_eventTask = nullptr;
     char *m_eventUrl;
     static list<OpenHabObject *> m_eventHandlers;
+    static mutex m_eventHandlersLock; // Only for changing or copying the list, never held while dispatching
     volatile bool m_abort = false;
     esp_http_client *m_handle;
+    mutex m_handleLock; // Keeps m_handle from being freed while disconnectEventChannel() cancels it
 };
 
 

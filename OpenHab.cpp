@@ -11,6 +11,7 @@
 #include "HttpRequests.h"
 
 list<OpenHabObject *> OpenHab::m_eventHandlers;
+mutex OpenHab::m_eventHandlersLock;
 
 static vector<string> split (const string &s, char delim) {
     vector<string> result;
@@ -45,7 +46,7 @@ OpenHab::OpenHab(string baseUrl, string apiToken) :
     m_eventUrl(nullptr),
     m_handle(nullptr)
 {
-    HttpRequests::setApiToken(apiToken);
+    HttpRequests::setApiToken(m_apiToken); // apiToken itself has been moved from
 }
 
 void OpenHab::connectEventChannel()
@@ -64,15 +65,29 @@ void OpenHab::connectEventChannel()
 void OpenHab::disconnectEventChannel()
 {
     printf("Cancelling event stream request\r\n");
+    m_abort = true;
+    bool cancelled = false;
+    TickType_t lastCancel = 0;
     while (m_eventTask)
     {
-        m_abort = true;
-        if (m_handle)
-            esp_http_client_cancel_request(m_handle);
+        // At most once a second: each cancel closes and reopens the connection
+        if (!cancelled || xTaskGetTickCount() - lastCancel >= pdMS_TO_TICKS(1000))
+        {
+            m_handleLock.lock();
+            if (m_handle)
+                esp_http_client_cancel_request(m_handle);
+            m_handleLock.unlock();
+            cancelled = true;
+            lastCancel = xTaskGetTickCount();
+        }
+        // Must yield. This runs on the system event task (prio 20, core 0); spinning
+        // starved the event task (prio 3, core 0), so it never exited.
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 
     m_abort = false;
     free(m_eventUrl);
+    m_eventUrl = nullptr; // Else a second disconnect frees it again
 
 //    if (m_eventTask)
 //    {
@@ -86,29 +101,28 @@ int OpenHab::openHabEvent(esp_http_client_event *ev)
 {
     static string eventBuffer;
 
-    if (ev->event_id == HTTP_EVENT_ON_DATA)
+    if (ev->event_id == HTTP_EVENT_ON_DATA && ev->data_len > 0) // Empty buffer would be indexed at -1 below
     {
         for (int i = 0; i < ev->data_len; i++)
             eventBuffer.push_back(((char *) ev->data)[i]);
 
 //        printf("Event buffer now %s\r\n", eventBuffer.c_str());
 
-        const regex ws_re("\\r?\\n"); // whitespace
+        // Split into complete lines by hand, the rest stays buffered. Same result as
+        // the std::regex split this replaces, which was heavy on a 4k stack at ~17
+        // events per second.
         vector<string> pieces;
-
-        copy(sregex_token_iterator(eventBuffer.begin(), eventBuffer.end(), ws_re, -1),
-             sregex_token_iterator(),
-             back_inserter(pieces));
-
-        if (eventBuffer[eventBuffer.length() - 1] == '\n')
+        size_t start = 0;
+        size_t nl;
+        while ((nl = eventBuffer.find('\n', start)) != string::npos)
         {
-            eventBuffer.clear();
+            size_t end = nl;
+            if (end > start && eventBuffer[end - 1] == '\r')
+                end--;
+            pieces.push_back(eventBuffer.substr(start, end - start));
+            start = nl + 1;
         }
-        else
-        {
-            eventBuffer = pieces[pieces.size() - 1];
-            pieces.pop_back();
-        }
+        eventBuffer.erase(0, start);
 
         if (!pieces.empty())
         {
@@ -137,6 +151,8 @@ int OpenHab::openHabEvent(esp_http_client_event *ev)
                     {
                         auto topic = msg["topic"].get<string>();
                         auto pathParts = split(topic, '/');
+                        if (pathParts.size() < 3)
+                            continue;
                         msg["target"] = pathParts[2];
                         msg["path_parts"] = pathParts;
                     }
@@ -147,8 +163,17 @@ int OpenHab::openHabEvent(esp_http_client_event *ev)
 
                     if (msg.contains("payload"))
                     {
-                        json payload = json::parse(msg["payload"].get<string>());
-                        msg["payload"] = payload;
+                        // Uncaught, a bad payload aborts the whole device
+                        try
+                        {
+                            json payload = json::parse(msg["payload"].get<string>());
+                            msg["payload"] = payload;
+                        }
+                        catch (exception &e)
+                        {
+                            printf("Bad event payload: %s\r\n", e.what());
+                            continue;
+                        }
                     }
 
 //                    printf("JSON: %s\r\n", msg.dump().c_str());
@@ -189,10 +214,18 @@ void OpenHab::openHabEventTask(void *user)
 
     while (true)
     {
-        openhab->m_handle = esp_http_client_init(&conf);
-        esp_err_t err = esp_http_client_perform(openhab->m_handle);
-        esp_http_client_close(openhab->m_handle);
+        esp_http_client *handle = esp_http_client_init(&conf);
+        openhab->m_handleLock.lock();
+        openhab->m_handle = handle;
+        openhab->m_handleLock.unlock();
+
+        esp_err_t err = esp_http_client_perform(handle);
+
+        // Detach before freeing, so a concurrent cancel can't use a freed client
+        openhab->m_handleLock.lock();
         openhab->m_handle = nullptr;
+        openhab->m_handleLock.unlock();
+        esp_http_client_cleanup(handle);
 
         printf("http_client_perform exited with code %d\r\n", err);
         if (openhab->m_abort)
@@ -211,6 +244,7 @@ void OpenHab::openHabEventTask(void *user)
             continue;
         }
         printf("Event channel disconnected, error %d, retrying\r\n", err);
+        vTaskDelay(1000 / portTICK_PERIOD_MS); // Don't hammer a server that refuses us
     }
 
     vTaskDelete(nullptr);
@@ -220,7 +254,14 @@ void OpenHab::sendStatusUpdate(json& msg)
 {
     auto target = msg["target"].get<string>();
 
-    for (auto o : m_eventHandlers)
+    // Dispatch from a copy. Flyouts register and unregister widgets from the UI task
+    // while this runs, which changed the list under the loop. The lock is not held
+    // while handlers run, so it can't interfere with their own locking.
+    m_eventHandlersLock.lock();
+    vector<OpenHabObject *> handlers(m_eventHandlers.begin(), m_eventHandlers.end());
+    m_eventHandlersLock.unlock();
+
+    for (auto o : handlers)
     {
         o->handleEvent(target, msg);
     }
@@ -381,12 +422,14 @@ ItemType OpenHab::mapItemType(const json &data)
 
 void OpenHab::registerEventHandler(OpenHabObject *obj)
 {
+    lock_guard<mutex> guard(m_eventHandlersLock);
     if (std::find(m_eventHandlers.begin(), m_eventHandlers.end(),obj) == m_eventHandlers.end())
         m_eventHandlers.push_back(obj);
 }
 
 void OpenHab::unregisterEventHandler(OpenHabObject *obj)
 {
+    lock_guard<mutex> guard(m_eventHandlersLock);
     m_eventHandlers.remove(obj);
 }
 

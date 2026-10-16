@@ -26,10 +26,12 @@ void IconLoader::init(string baseUrl)
 
 void IconLoader::fetchIcon(const string &name, int size)
 {
-    m_iconLock.lock();
-
+    // Checked before taking the lock: returning here with it held blocked every
+    // later icon request, so a widget with icon "none" stopped the rest loading
     if (name == "none")
         return;
+
+    m_iconLock.lock();
 
     auto icon = findIcon(name, size, size);
 
@@ -137,14 +139,28 @@ void IconLoader::NetworkQueueTask(void *user)
         };
 
         esp_http_client *handle = esp_http_client_init(&conf);
+        if (handle == nullptr)
+        {
+            printf("%s: failed to init http client\r\n", info->name.c_str());
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            m_netRequestQueueLock.lock();
+            continue;
+        }
 
         err = esp_http_client_perform(handle);
 
         info->status_code = esp_http_client_get_status_code(handle);
 
-        esp_http_client_close(handle);
+        esp_http_client_cleanup(handle); // close alone leaked the client and its buffers
 
         printf("%s: err is %d, status %d, data len %d\r\n", info->name.c_str(), err, info->status_code, info->data.size());
+
+        if (err != ESP_OK)
+        {
+            // Network failure: don't cache it, so the icon is fetched again next time
+            m_netRequestQueueLock.lock();
+            continue;
+        }
 
         m_iconLock.lock();
         m_icons.push_back(info);
@@ -167,10 +183,14 @@ void IconLoader::NetworkQueueTask(void *user)
 
 void IconLoader::Dispatch(IconInfo *info)
 {
+    // Call the receivers from a copy, without the lock. Receivers may wait for their
+    // UI lock, while the UI task may wait for this lock to (un)register a receiver.
     m_receiverLock.lock();
-    for (auto rec : m_receivers)
-        rec->receiveIcon(info);
+    vector<IconReceiver *> receivers(m_receivers.begin(), m_receivers.end());
     m_receiverLock.unlock();
+
+    for (auto rec : receivers)
+        rec->receiveIcon(info);
 }
 
 void IconLoader::addIconFromData(string name, const uint8_t* data, int width, int height)
